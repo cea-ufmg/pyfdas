@@ -29,5 +29,5 @@ setup(
     classifiers=CLASSIFIERS.split('\n'),
     platforms=["Linux", "Unix"],
     license="MIT",
-    url="http://github.com/cea-ufmg/ceacoest",
+    url="http://github.com/cea-ufmg/pyfdas",
 )
