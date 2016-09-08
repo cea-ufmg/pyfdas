@@ -9,9 +9,14 @@ import time
 
 import pynmea2
 import serial
+import pymavlink.dialects.v10.ceaufmg as mavlink
 
 
 class GPSStream:
+    
+    MAX_BUFF_SIZE = 100
+    """Maximum required buffer size."""
+    
     def __init__(self, port):
         self.port = serial.Serial(port, timeout=0)
         """GPS serial port stream."""
@@ -24,58 +29,51 @@ class GPSStream:
         self.started = None
         """Timestamp of receipt of message start marker or `None`."""
         
-        self.buff = b''
+        self.buff = bytearray()
         """GPS stream receive buffer."""
-
-        self.re = re.compile(br'''
-            # Message start marker
-            \$
-        
-            # Message type identifier
-            (?: (?: G[A-Z]{4}) | (?: P[A-Z]{3}))
-
-            # Message data
-            [-.,A-Z0-9]*
-        
-            # Optional checksum
-            (?: \*[0-9A-F]{2})?
-
-            # Message end marker (CR-LF)
-            \r\n
-            ''', re.X | re.IGNORECASE)
-        """NMEA message regular expression."""
+    
+    def handle_nmea(self, msg, time_us):
+        pass
+    
+    def handle_mavlink(self, msg):
+        pass
+    
+    def _parse(self):
+        """Parse and reset the message buffer."""
+        try:
+            text = self.buff.decode('ascii')
+            msg = pynmea2.parse(text)
+            self.handle_nmea(msg, self.started)
+        except Exception:
+            #### LOG ERROR
+            pass
+        finally:
+            self.buff.clear()
+            self.started = None
     
     def _process(self):
+        """Process the GPS stream."""
+        # Wait for data to arrive
         selected = self.sel.select()
         if not selected:
             raise InterruptedError
-        
-        timestamp = get_time_us()
+
+        # Retrieve the data available
         data = self.port.read(self.port.in_waiting)
-        self.buff = self.buff + data
-        
-        out = []
-        if self.started and b'\n' in data:
-            try:
-                out.append(self._parse_one())
-            except Exception:
-                pass
-    
-    def _parse_one(self):
-        match = self.re.match(self.buff)
-        if not match:
-            ### clean buffer
-            raise ValueError
-        
-        try:
-            msg = pynmea2.parse(match.group())
-            msg.time_us = self.started
-        finally:
-            self.started = None
-            self.buff = self.buff[match.end():]
-            ### clean buffer up to next $
-        
-        return msg        
+
+        # Process each received character
+        for char in data:
+            if char == ord('$'):
+                # Reset buffer and timestamp
+                self.started = get_time_us()
+                self.buff.clear()
+                self.buff.append(char)
+            elif self.started:
+                self.buff.append(char)
+                if char == ord('\n'):
+                    self.parse()
+                elif len(self.buff) > self.MAX_BUFF_SIZE + 50:
+                    del self.buff[:-self.MAX_BUFF_SIZE] # truncate buffer
 
 
 def get_time_us():
