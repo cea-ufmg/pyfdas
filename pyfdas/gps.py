@@ -12,6 +12,18 @@ import serial
 import pymavlink.dialects.v10.ceaufmg as mavlink
 
 
+def nmea_to_mavlink(msg, time_usec=0):
+    if isinstance(msg, pynmea2.types.talker.GGA):
+        return mavlink.MAVLink_gps_gga_message(
+            time_usec=time_usec, fix_time=total_seconds(msg.timestamp),
+            latitude=to_float(msg.latitude), longitude=to_float(msg.longitude),
+            quality=msg.gps_qual,  num_sats=msg.num_sats,
+            hdop=msg.horizontal_dil, altitude=msg.altitude,
+            geoid_height=to_float(msg.geo_sep), age_dgps=to_float(msg.geo_sep),
+            dgps_id=msg.ref_station_id
+        )
+    
+    
 class GPSStream:
     
     MAX_BUFF_SIZE = 100
@@ -32,7 +44,7 @@ class GPSStream:
         self.buff = bytearray()
         """GPS stream receive buffer."""
     
-    def handle_nmea(self, msg, time_us):
+    def handle_nmea(self, msg, time_usec):
         pass
     
     def handle_mavlink(self, msg):
@@ -40,17 +52,26 @@ class GPSStream:
     
     def _parse(self):
         """Parse and reset the message buffer."""
+        # Retrieve buffer contents
+        text = self.buff.decode(encoding='ascii', errors='ignore')
+        time_usec = self.started
+
+        # Reset the buffer
+        self.buff.clear()
+        self.started = None
+
+        # Parse the NMEA message
         try:
-            text = self.buff.decode('ascii')
             msg = pynmea2.parse(text)
-            self.handle_nmea(msg, self.started)
         except Exception:
-            #### LOG ERROR
+            return
+
+        # Handle the NMEA message
+        try:
+            self.handle_nmea(msg, time_usec)
+        except Exception:
             pass
-        finally:
-            self.buff.clear()
-            self.started = None
-    
+            
     def _process(self):
         """Process the GPS stream."""
         # Wait for data to arrive
@@ -78,6 +99,29 @@ class GPSStream:
 
 def get_time_us():
     return int(time.clock_gettime(time.CLOCK_REALTIME) * 1e6)
+
+
+def total_seconds(t):
+    """Total of seconds of a datetime.time instance."""
+    if isinstance(t, datetime.time):
+        return ((t.hour*60 + t.minute)*60 + t.second + t.microsecond*1e-6)
+    else:
+        return float('nan')
+
+
+def to_float(x):
+    """Convert argument to float or nan if error."""
+    try:
+        return float(x)
+    except (ValueError, TypeError):
+        return float('nan')
+
+def to_int(x):
+    """Convert argument to int or -1 if error."""
+    try:
+        return int(x)
+    except (ValueError, TypeError):
+        return -1
 
 
 def program_arguments():
