@@ -2,7 +2,10 @@
 
 
 import argparse
+import datetime
 import io
+import logging
+import os
 import re
 import selectors
 import time
@@ -17,10 +20,21 @@ def nmea_to_mavlink(msg, time_usec=0):
         return mavlink.MAVLink_gps_gga_message(
             time_usec=time_usec, fix_time=total_seconds(msg.timestamp),
             latitude=to_float(msg.latitude), longitude=to_float(msg.longitude),
-            quality=msg.gps_qual,  num_sats=msg.num_sats,
-            hdop=msg.horizontal_dil, altitude=msg.altitude,
+            quality=to_int(msg.gps_qual),  num_sats=to_int(msg.num_sats),
+            hdop=to_float(msg.horizontal_dil), altitude=to_float(msg.altitude),
             geoid_height=to_float(msg.geo_sep), age_dgps=to_float(msg.geo_sep),
             dgps_id=msg.ref_station_id
+        )
+    elif isinstance(msg, pynmea2.types.talker.RMC):
+        dt = msg.datetime.replace(tzinfo=datetime.timezone.utc)
+        fix_time_usec = dt.timestamp() * 1e6
+        return mavlink.MAVLink_gps_rmc_message(
+            time_usec=time_usec, fix_time_usec=fix_time_usec,
+            warning=msg.status,
+            latitude=to_float(msg.latitude), longitude=to_float(msg.longitude),
+            speed=msg.spd_over_grnd, course=msg.true_course,
+            mag_var=to_float(msg.mag_variation, dir=msg.mag_var_dir),
+            mode=''
         )
     
     
@@ -29,7 +43,7 @@ class GPSStream:
     MAX_BUFF_SIZE = 100
     """Maximum required buffer size."""
     
-    def __init__(self, port):
+    def __init__(self, port, logtxtdir=None):
         self.port = serial.Serial(port, timeout=0)
         """GPS serial port stream."""
         
@@ -43,35 +57,61 @@ class GPSStream:
         
         self.buff = bytearray()
         """GPS stream receive buffer."""
+
+        self.logtxt = bool(logtxtdir)
+        """Whether to log messages as text."""
+        
+        self.logtxtdir = logtxtdir
+        """Directory to log messages as text."""
+
+        self.text_logs = {}
+        """NMEA log files."""
+
+        if self.logtxt:
+            os.makedirs(logtxtdir, exist_ok=True)
     
-    def handle_nmea(self, msg, time_usec):
-        pass
+    def handle(self, msg):
+        """Handle MAVLink message."""
+        # Log as plaintext
+        if self.logtxt:
+            # Get the log file
+            try:
+                log = self.text_logs[msg.name]
+            except KeyError:
+                logname = os.path.join(self.logtxtdir, msg.name + '.log')
+                log = file.open(logname, 'wa')
+                self.text_logs[msg.name] = log
+            # Log the message 
+            values = (getattr(msg, f) for f in msg.fieldnames)
+            print(*values, file=log)
     
-    def handle_mavlink(self, msg):
-        pass
-    
-    def _parse(self):
+    def _parse_and_handle(self):
         """Parse and reset the message buffer."""
         # Retrieve buffer contents
         text = self.buff.decode(encoding='ascii', errors='ignore')
         time_usec = self.started
-
+        
         # Reset the buffer
         self.buff.clear()
         self.started = None
-
+        
         # Parse the NMEA message
         try:
-            msg = pynmea2.parse(text)
-        except Exception:
-            return
+            nmea_msg = pynmea2.parse(text)
+        except ValueError as e:
+            logging.error("Error parsing NMEA message, %s", e)
 
-        # Handle the NMEA message
+        # Convert to MAVLink
+        mavlink_msg = nmea_to_mavlink(nmea_msg)
+        if mavlink_msg is None:
+            return
+        
+        # Handle
         try:
-            self.handle_nmea(msg, time_usec)
-        except Exception:
-            pass
-            
+            self.handle(mavlink_msg)
+        except Exception as e:
+            logging.error("Error handling message", exc_info=True)
+    
     def _process(self):
         """Process the GPS stream."""
         # Wait for data to arrive
@@ -102,31 +142,34 @@ def get_time_us():
 
 
 def total_seconds(t):
-    """Total of seconds of a datetime.time instance."""
+    """Total of seconds of datetime.time objects."""
     if isinstance(t, datetime.time):
         return ((t.hour*60 + t.minute)*60 + t.second + t.microsecond*1e-6)
     else:
         return float('nan')
 
 
-def to_float(x):
-    """Convert argument to float or nan if error."""
+def to_float(x, error=float('nan'), dir='N'):
+    """Convert argument to float, treating errors and direction."""
     try:
-        return float(x)
+        sign = -1 if dir in 'SW' else 1
+        return float(x) * sign
     except (ValueError, TypeError):
-        return float('nan')
+        return error
 
-def to_int(x):
-    """Convert argument to int or -1 if error."""
+def to_int(x, error=0):
+    """Convert argument to int."""
     try:
         return int(x)
     except (ValueError, TypeError):
-        return -1
+        return error
 
 
 def program_arguments():
     parser = argparse.ArgumentParser(description='Read GPS stream')
     parser.add_argument('gpsport')
+    parser.add_argument('--logtxtdir', metavar='DIR',
+                        help='write received data as text in DIR')
     return parser.parse_args()
 
 
