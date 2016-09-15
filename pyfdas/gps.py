@@ -16,7 +16,8 @@ import pymavlink.dialects.v10.ceaufmg as mavlink
 
 
 def nmea_to_mavlink(msg, time_usec=0):
-    if isinstance(msg, pynmea2.types.talker.GGA):
+    """Convert NMEA message to Mavlink."""
+    if isinstance(msg, pynmea2.GGA):
         return mavlink.MAVLink_gps_gga_message(
             time_usec=time_usec, fix_time=total_seconds(msg.timestamp),
             latitude=to_float(msg.latitude), longitude=to_float(msg.longitude),
@@ -25,26 +26,41 @@ def nmea_to_mavlink(msg, time_usec=0):
             geoid_height=to_float(msg.geo_sep), age_dgps=to_float(msg.geo_sep),
             dgps_id=msg.ref_station_id
         )
-    elif isinstance(msg, pynmea2.types.talker.RMC):
+    elif isinstance(msg, pynmea2.RMC):
         dt = msg.datetime.replace(tzinfo=datetime.timezone.utc)
-        fix_time_usec = dt.timestamp() * 1e6
+        fix_time_usec = dt.timestamp() * 1e6        
+        mode = msg.data[-1] if len(msg.data) == 12 else ''
         return mavlink.MAVLink_gps_rmc_message(
             time_usec=time_usec, fix_time_usec=fix_time_usec,
             warning=msg.status,
             latitude=to_float(msg.latitude), longitude=to_float(msg.longitude),
             speed=msg.spd_over_grnd, course=msg.true_course,
             mag_var=to_float(msg.mag_variation, dir=msg.mag_var_dir),
-            mode=''
+            mode=mode
         )
+    elif isinstance(msg, pynmea2.grm.GRME):
+        return mavlink.MAVLink_gps_pgrme_message(
+            time_usec=time_usec,
+            hpe=to_float(msg.hpe),
+            vpe=to_float(msg.vpe),
+            epe=to_float(msg.osepe)
+        )
+    elif msg.sentence_type == 'GRMV':
+        return mavlink.MAVLink_gps_pgrmv_message(
+            time_usec=time_usec,
+            veast=to_float(msg.data[0]),
+            vnorth=to_float(msg.data[1]),
+            vup=to_float(msg.data[2])
+        )
+
     
-    
-class GPSStream:
+class GPSStreamReader:
     
     MAX_BUFF_SIZE = 100
     """Maximum required buffer size."""
     
     def __init__(self, port, logtxtdir=None):
-        self.port = serial.Serial(port, timeout=0)
+        self.port = port
         """GPS serial port stream."""
         
         sel = selectors.DefaultSelector()
@@ -69,7 +85,7 @@ class GPSStream:
 
         if self.logtxt:
             os.makedirs(logtxtdir, exist_ok=True)
-    
+            
     def handle(self, msg):
         """Handle MAVLink message."""
         # Log as plaintext
@@ -78,12 +94,25 @@ class GPSStream:
             try:
                 log = self.text_logs[msg.name]
             except KeyError:
-                logname = os.path.join(self.logtxtdir, msg.name + '.log')
-                log = file.open(logname, 'wa')
-                self.text_logs[msg.name] = log
+                log = self._open_text_log(msg)
+            
             # Log the message 
             values = (getattr(msg, f) for f in msg.fieldnames)
             print(*values, file=log)
+
+    def run(self):
+        while True:
+            self._process()
+    
+    def _open_text_log(self, msg):
+        # Open the file
+        logname = os.path.join(self.logtxtdir, msg.name + '.log')
+        log = self.text_logs[msg.name] = open(logname, 'w')
+        
+        # Print the header
+        print('# ', *msg.fieldnames, file=log)
+                
+        return log
     
     def _parse_and_handle(self):
         """Parse and reset the message buffer."""
@@ -100,9 +129,10 @@ class GPSStream:
             nmea_msg = pynmea2.parse(text)
         except ValueError as e:
             logging.error("Error parsing NMEA message, %s", e)
+            return
 
         # Convert to MAVLink
-        mavlink_msg = nmea_to_mavlink(nmea_msg)
+        mavlink_msg = nmea_to_mavlink(nmea_msg, time_usec)
         if mavlink_msg is None:
             return
         
@@ -132,7 +162,7 @@ class GPSStream:
             elif self.started:
                 self.buff.append(char)
                 if char == ord('\n'):
-                    self.parse()
+                    self._parse_and_handle()
                 elif len(self.buff) > self.MAX_BUFF_SIZE + 50:
                     del self.buff[:-self.MAX_BUFF_SIZE] # truncate buffer
 
@@ -165,14 +195,17 @@ def to_int(x, error=0):
         return error
 
 
-def program_arguments():
+def main():
     parser = argparse.ArgumentParser(description='Read GPS stream')
     parser.add_argument('gpsport')
     parser.add_argument('--logtxtdir', metavar='DIR',
                         help='write received data as text in DIR')
-    return parser.parse_args()
+    args = parser.parse_args()
+    
+    port = serial.Serial(args.gpsport, baudrate=38400, timeout=0)
+    reader = GPSStreamReader(port, args.logtxtdir)
+    reader.run()
 
 
 if __name__ == '__main__':
-    args = program_arguments()
-
+    main()
