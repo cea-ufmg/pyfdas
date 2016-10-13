@@ -5,7 +5,7 @@ import argparse
 
 from pymavlink.dialects.v10 import ceaufmg as mavlink
 from pymavlink import mavutil
-
+import numpy as np
 
 def main():
     """Parse a MAVLink log."""
@@ -20,6 +20,8 @@ def main():
     
     conn = mavutil.mavlink_connection(args.log, dialect=args.dialect,
                                       notimestamps=args.notimestamps)
+    conn._link = None
+    
     while True:
         msg = conn.recv_match(condition=args.condition)
         if msg is None:
@@ -27,8 +29,12 @@ def main():
         elif msg.get_type() == 'BAD_DATA':
             continue
         else:
-            print(msg)
+            header = msg.get_header()
+            timestamp = msg._timestamp or 0
+            fields = [getattr(msg, name) for name in msg.fieldnames]
+            print(header.msgId, header.srcSystem, header.srcComponent,
+                  timestamp, *fields)
 
-    
+
 if __name__ == '__main__':
     main()
